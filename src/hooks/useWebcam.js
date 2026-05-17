@@ -55,7 +55,7 @@ export function useWebcam() {
     setFacingMode((prev) => (prev === 'environment' ? 'user' : 'environment'));
   }, [stopCamera]);
 
-  // Capture current frame as raw JPEG Blob — 320px matches server imgsz
+  // Capture current frame as base64 JPEG — 320px matches server imgsz
   const captureFrame = useCallback(() => {
     if (!videoRef.current || !canvasRef.current) return null;
 
@@ -70,13 +70,7 @@ export function useWebcam() {
     const ctx = canvas.getContext('2d');
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.5);
-    const binary = atob(dataUrl.split(',')[1]);
-    const array = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
-      array[i] = binary.charCodeAt(i);
-    }
-    return new Blob([array], { type: 'image/jpeg' });
+    return canvas.toDataURL('image/jpeg', 0.5);
   }, []);
 
   // Capture as Blob for upload

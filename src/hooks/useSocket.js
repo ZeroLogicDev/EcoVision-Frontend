@@ -5,7 +5,7 @@ const WS_URL = import.meta.env.VITE_AI_WS_URL;
 
 /**
  * Hook for direct WebSocket connection to FastAPI AI engine.
- * Sends raw binary JPEG frames (no base64 overhead).
+ * Sends base64 JSON text (binary doesn't work well with HF proxy).
  */
 export function useSocket() {
   const wsRef = useRef(null);
@@ -25,7 +25,6 @@ export function useSocket() {
 
     setConnectionStatus('connecting');
     const ws = new WebSocket(WS_URL);
-    ws.binaryType = 'arraybuffer'; // ← Expect binary responses if needed
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -36,23 +35,19 @@ export function useSocket() {
       // Keep-alive ping every 25s to prevent HF cold sleep
       keepAliveTimer.current = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
-          ws.send(new Uint8Array([0])); // 1-byte ping
+          ws.send(JSON.stringify({ ping: true }));
         }
       }, 25000);
     };
 
     ws.onmessage = (event) => {
       try {
-        // Response is always JSON text
-        const data = typeof event.data === 'string'
-          ? JSON.parse(event.data)
-          : JSON.parse(new TextDecoder().decode(event.data));
-
+        const data = JSON.parse(event.data);
         if (data.detections) {
           setDetections(data.detections);
         }
-      } catch (err) {
-        // Ignore ping/pong responses
+      } catch {
+        // Ignore pong or malformed messages
       }
     };
 
@@ -86,10 +81,13 @@ export function useSocket() {
     setConnectionStatus('disconnected');
   }, []);
 
-  // Send raw binary JPEG blob — no base64, no JSON wrapper
-  const sendFrame = useCallback((blob) => {
+  // Send base64 frame as JSON text
+  const sendFrame = useCallback((base64Frame) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(blob); // ← Send Blob directly as binary
+      wsRef.current.send(JSON.stringify({
+        frame: base64Frame,
+        timestamp: Date.now(),
+      }));
     }
   }, []);
 
