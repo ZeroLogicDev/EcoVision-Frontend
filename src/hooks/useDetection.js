@@ -55,14 +55,20 @@ export function useDetection() {
   useEffect(() => {
     if (!isStreaming || !webcam.isActive || !isConnected) return;
 
+    const MIN_FRAME_INTERVAL = 100; // 10 FPS cap (100ms minimum between frames)
+    let lastSendTime = 0;
+
     const loop = () => {
       if (!isStreaming) return;
 
-      // Only send if NOT waiting for previous response
-      if (!waitingRef.current) {
+      const now = performance.now();
+
+      // Only send if NOT waiting AND enough time has passed (10 FPS cap)
+      if (!waitingRef.current && now - lastSendTime >= MIN_FRAME_INTERVAL) {
         const frame = webcam.captureFrame();
         if (frame) {
           waitingRef.current = true; // ← Block until response
+          lastSendTime = now;
           socket.sendFrame(frame);
           incrementFrameCount();
         }
