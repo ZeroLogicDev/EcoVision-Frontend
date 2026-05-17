@@ -2,6 +2,7 @@ import axios from 'axios';
 
 const AI_API_URL = import.meta.env.VITE_AI_API_URL;
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL;
+const API_KEY = import.meta.env.VITE_API_KEY;
 
 /**
  * Scan service — handles image upload for AI prediction.
@@ -18,8 +19,13 @@ const scanService = {
     const baseUrl = BACKEND_URL || AI_API_URL;
     const endpoint = BACKEND_URL ? '/api/predict' : '/predict/upload';
 
+    const headers = { 'Content-Type': 'multipart/form-data' };
+    if (API_KEY && BACKEND_URL) {
+      headers['X-API-Key'] = API_KEY;
+    }
+
     const { data } = await axios.post(`${baseUrl}${endpoint}`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
+      headers,
       timeout: 60000, // 60s for cold start
     });
 
