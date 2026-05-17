@@ -55,24 +55,22 @@ export function useWebcam() {
     setFacingMode((prev) => (prev === 'environment' ? 'user' : 'environment'));
   }, [stopCamera]);
 
-  // Capture current frame as raw JPEG Blob — 640px for accuracy
+  // Capture current frame as raw JPEG Blob — 320px matches server imgsz
   const captureFrame = useCallback(() => {
     if (!videoRef.current || !canvasRef.current) return null;
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
 
-    // Scale to 640px — matches yolo26m input for maximum accuracy
-    const scale = Math.min(640 / video.videoWidth, 640 / video.videoHeight);
+    // 320px — server uses imgsz=320, sending larger is wasted bandwidth
+    const scale = Math.min(320 / video.videoWidth, 320 / video.videoHeight);
     canvas.width = Math.round(video.videoWidth * scale);
     canvas.height = Math.round(video.videoHeight * scale);
 
     const ctx = canvas.getContext('2d');
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    // Return Blob synchronously via toDataURL → convert to Blob
-    // (toBlob is async and harder to integrate with requestAnimationFrame loop)
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.65);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.5);
     const binary = atob(dataUrl.split(',')[1]);
     const array = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) {
