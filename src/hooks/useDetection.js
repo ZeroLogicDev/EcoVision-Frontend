@@ -2,18 +2,18 @@ import { useEffect, useRef, useCallback, useState } from 'react';
 import { useWebcam } from './useWebcam';
 import { useSocket } from './useSocket';
 import { useDetectionStore } from '@/store/detectionStore';
-import { createFrameThrottler } from '@/utils/frameThrottler';
 import { drawDetections, clearCanvas } from '@/utils/canvasHelper';
 
 /**
  * Orchestrator hook — combines webcam + WebSocket + canvas drawing.
+ * Implements backpressure: only sends next frame after receiving response.
  */
 export function useDetection() {
   const webcam = useWebcam();
   const socket = useSocket();
   const overlayCanvasRef = useRef(null);
   const animationRef = useRef(null);
-  const throttlerRef = useRef(createFrameThrottler(5));
+  const waitingRef = useRef(false); // ← Backpressure flag
   const fpsCountRef = useRef({ count: 0, lastTime: performance.now() });
 
   const {
@@ -31,6 +31,7 @@ export function useDetection() {
     await webcam.startCamera();
     socket.connect();
     setIsStreaming(true);
+    waitingRef.current = false;
   }, [webcam, socket, setIsStreaming]);
 
   const stopLiveDetection = useCallback(() => {
@@ -38,6 +39,7 @@ export function useDetection() {
     webcam.stopCamera();
     socket.disconnect();
     resetDetections();
+    waitingRef.current = false;
 
     if (animationRef.current) {
       cancelAnimationFrame(animationRef.current);
@@ -49,27 +51,20 @@ export function useDetection() {
     }
   }, [webcam, socket, resetDetections, setIsStreaming]);
 
-  // Main detection loop
+  // Main detection loop — with backpressure
   useEffect(() => {
     if (!isStreaming || !webcam.isActive || !isConnected) return;
 
     const loop = () => {
       if (!isStreaming) return;
 
-      if (throttlerRef.current.shouldCapture()) {
+      // Only send if NOT waiting for previous response
+      if (!waitingRef.current) {
         const frame = webcam.captureFrame();
         if (frame) {
+          waitingRef.current = true; // ← Block until response
           socket.sendFrame(frame);
           incrementFrameCount();
-
-          // Calculate FPS
-          fpsCountRef.current.count++;
-          const now = performance.now();
-          if (now - fpsCountRef.current.lastTime >= 1000) {
-            setFPS(fpsCountRef.current.count);
-            fpsCountRef.current.count = 0;
-            fpsCountRef.current.lastTime = now;
-          }
         }
       }
 
@@ -84,6 +79,23 @@ export function useDetection() {
       }
     };
   }, [isStreaming, webcam.isActive, isConnected]);
+
+  // When detections arrive → unblock next frame + calculate FPS
+  useEffect(() => {
+    if (!isStreaming) return;
+
+    // Response received — allow next frame
+    waitingRef.current = false;
+
+    // Calculate FPS
+    fpsCountRef.current.count++;
+    const now = performance.now();
+    if (now - fpsCountRef.current.lastTime >= 1000) {
+      setFPS(fpsCountRef.current.count);
+      fpsCountRef.current.count = 0;
+      fpsCountRef.current.lastTime = now;
+    }
+  }, [detections]);
 
   // Draw detections on overlay canvas
   useEffect(() => {

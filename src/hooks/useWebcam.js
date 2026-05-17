@@ -55,19 +55,22 @@ export function useWebcam() {
     setFacingMode((prev) => (prev === 'environment' ? 'user' : 'environment'));
   }, [stopCamera]);
 
-  // Capture current frame as base64 JPEG
+  // Capture current frame as base64 JPEG — downscaled to 320px for speed
   const captureFrame = useCallback(() => {
     if (!videoRef.current || !canvasRef.current) return null;
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+
+    // Downscale to 320px (matches yolo26n input) to reduce payload
+    const scale = Math.min(320 / video.videoWidth, 320 / video.videoHeight);
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
 
     const ctx = canvas.getContext('2d');
-    ctx.drawImage(video, 0, 0);
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    return canvas.toDataURL('image/jpeg', 0.7); // 70% quality for speed
+    return canvas.toDataURL('image/jpeg', 0.5); // 50% quality — YOLO doesn't need HQ
   }, []);
 
   // Capture as Blob for upload
