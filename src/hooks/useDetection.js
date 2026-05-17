@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useState } from 'react';
+import { useEffect, useRef, useCallback } from 'react';
 import { useWebcam } from './useWebcam';
 import { useSocket } from './useSocket';
 import { useDetectionStore } from '@/store/detectionStore';
@@ -6,15 +6,16 @@ import { drawDetections, clearCanvas } from '@/utils/canvasHelper';
 
 /**
  * Orchestrator hook — combines webcam + WebSocket + canvas drawing.
- * Implements backpressure: only sends next frame after receiving response.
+ * Implements backpressure + 10 FPS cap + round-trip latency tracking.
  */
 export function useDetection() {
   const webcam = useWebcam();
   const socket = useSocket();
   const overlayCanvasRef = useRef(null);
   const animationRef = useRef(null);
-  const waitingRef = useRef(false); // ← Backpressure flag
-  const fpsCountRef = useRef({ count: 0, lastTime: performance.now() });
+  const waitingRef = useRef(false);
+  const sendTimeRef = useRef(0);        // ← Track when frame was sent
+  const fpsWindowRef = useRef([]);       // ← Sliding window for accurate FPS
 
   const {
     isConnected,
@@ -23,6 +24,7 @@ export function useDetection() {
     isStreaming,
     setIsStreaming,
     setFPS,
+    setLatency,
     incrementFrameCount,
     resetDetections,
   } = useDetectionStore();
@@ -32,6 +34,7 @@ export function useDetection() {
     socket.connect();
     setIsStreaming(true);
     waitingRef.current = false;
+    fpsWindowRef.current = [];
   }, [webcam, socket, setIsStreaming]);
 
   const stopLiveDetection = useCallback(() => {
@@ -40,6 +43,7 @@ export function useDetection() {
     socket.disconnect();
     resetDetections();
     waitingRef.current = false;
+    fpsWindowRef.current = [];
 
     if (animationRef.current) {
       cancelAnimationFrame(animationRef.current);
@@ -51,11 +55,11 @@ export function useDetection() {
     }
   }, [webcam, socket, resetDetections, setIsStreaming]);
 
-  // Main detection loop — with backpressure
+  // Main detection loop — backpressure + 10 FPS cap
   useEffect(() => {
     if (!isStreaming || !webcam.isActive || !isConnected) return;
 
-    const MIN_FRAME_INTERVAL = 100; // 10 FPS cap (100ms minimum between frames)
+    const MIN_FRAME_INTERVAL = 100; // 10 FPS cap
     let lastSendTime = 0;
 
     const loop = () => {
@@ -63,12 +67,12 @@ export function useDetection() {
 
       const now = performance.now();
 
-      // Only send if NOT waiting AND enough time has passed (10 FPS cap)
       if (!waitingRef.current && now - lastSendTime >= MIN_FRAME_INTERVAL) {
         const frame = webcam.captureFrame();
         if (frame) {
-          waitingRef.current = true; // ← Block until response
+          waitingRef.current = true;
           lastSendTime = now;
+          sendTimeRef.current = now; // ← Record send time for RTT
           socket.sendFrame(frame);
           incrementFrameCount();
         }
@@ -86,21 +90,26 @@ export function useDetection() {
     };
   }, [isStreaming, webcam.isActive, isConnected]);
 
-  // When detections arrive → unblock next frame + calculate FPS
+  // When detections arrive → unblock + measure RTT + calculate FPS
   useEffect(() => {
     if (!isStreaming) return;
 
-    // Response received — allow next frame
+    // Unblock next frame
     waitingRef.current = false;
 
-    // Calculate FPS
-    fpsCountRef.current.count++;
-    const now = performance.now();
-    if (now - fpsCountRef.current.lastTime >= 1000) {
-      setFPS(fpsCountRef.current.count);
-      fpsCountRef.current.count = 0;
-      fpsCountRef.current.lastTime = now;
+    // Measure round-trip time (not just server inference)
+    if (sendTimeRef.current > 0) {
+      const rtt = Math.round(performance.now() - sendTimeRef.current);
+      setLatency(rtt);
     }
+
+    // Sliding window FPS: count responses in last 1 second
+    const now = performance.now();
+    fpsWindowRef.current.push(now);
+    // Remove entries older than 1 second
+    fpsWindowRef.current = fpsWindowRef.current.filter(t => now - t < 1000);
+    setFPS(fpsWindowRef.current.length);
+
   }, [detections]);
 
   // Draw detections on overlay canvas
@@ -118,7 +127,6 @@ export function useDetection() {
   }, [detections]);
 
   return {
-    // Webcam
     videoRef: webcam.videoRef,
     captureCanvasRef: webcam.canvasRef,
     overlayCanvasRef,
@@ -126,8 +134,6 @@ export function useDetection() {
     isCameraActive: webcam.isActive,
     switchCamera: webcam.switchCamera,
     captureBlob: webcam.captureBlob,
-
-    // Detection
     startLiveDetection,
     stopLiveDetection,
     isStreaming,
