@@ -124,7 +124,7 @@ export function useDetection() {
     canvas.width = video.videoWidth || 640;
     canvas.height = video.videoHeight || 480;
 
-    drawDetections(ctx, detections, canvas.width, canvas.height, 320, 320);
+    drawDetections(ctx, detections, canvas.width, canvas.height, 640, 640);
   }, [detections]);
 
   return {

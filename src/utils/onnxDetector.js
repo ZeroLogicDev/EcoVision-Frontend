@@ -5,8 +5,8 @@ import { CLASS_NAMES } from '@/constants/wasteClasses';
 ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/';
 
 const MODEL_URL = '/models/yolo26n_eco.onnx';
-const INPUT_SIZE = 320;
-const CONF_THRESHOLD = 0.35;
+const INPUT_SIZE = 640;
+const CONF_THRESHOLD = 0.40;
 const IOU_THRESHOLD = 0.45;
 
 let session = null;

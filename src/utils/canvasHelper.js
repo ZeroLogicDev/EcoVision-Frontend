@@ -10,7 +10,7 @@ import { getClassConfig, getClassColor } from '@/constants/wasteClasses';
  * @param {number} modelWidth - Model input width (e.g., 320 or 640)
  * @param {number} modelHeight - Model input height
  */
-export function drawDetections(ctx, detections, videoWidth, videoHeight, modelWidth = 320, modelHeight = 320) {
+export function drawDetections(ctx, detections, videoWidth, videoHeight, modelWidth = 640, modelHeight = 640) {
   ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
 
   if (!detections || detections.length === 0) return;
