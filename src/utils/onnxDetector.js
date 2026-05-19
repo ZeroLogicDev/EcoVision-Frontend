@@ -118,22 +118,55 @@ export async function detectFrame(video, canvas) {
 
 /**
  * Parse YOLO output tensor → detections array.
- * YOLOv8/YOLO11 output shape: [1, numClasses + 4, numBoxes]
- * Where first 4 rows = cx, cy, w, h and remaining = class scores.
+ * Auto-detects format:
+ *   - [1, 4+nc, numBoxes] → standard (channels-first)
+ *   - [1, numBoxes, 4+nc] → transposed (channels-last)
  */
 function parseYoloOutput(output) {
-  const [batch, channels, numBoxes] = output.dims;
+  const dims = output.dims;
   const data = output.data;
-  const numClasses = channels - 4;
+
+  let numBoxes, numChannels, isTransposed;
+
+  if (dims.length === 3) {
+    // Detect layout: the smaller non-batch dimension is channels (4 + numClasses)
+    if (dims[1] < dims[2]) {
+      // [1, channels, numBoxes] — standard
+      numChannels = dims[1];
+      numBoxes = dims[2];
+      isTransposed = false;
+    } else {
+      // [1, numBoxes, channels] — transposed
+      numBoxes = dims[1];
+      numChannels = dims[2];
+      isTransposed = true;
+    }
+  } else if (dims.length === 2) {
+    // [numBoxes, channels]
+    numBoxes = dims[0];
+    numChannels = dims[1];
+    isTransposed = true;
+  } else {
+    console.warn('[ONNX] Unexpected output dims:', dims);
+    return [];
+  }
+
+  const numClasses = numChannels - 4;
+  console.log(`[ONNX] Output: ${dims.join('x')}, boxes=${numBoxes}, classes=${numClasses}, transposed=${isTransposed}`);
 
   const detections = [];
 
+  // Helper to read data based on layout
+  const get = isTransposed
+    ? (box, ch) => data[box * numChannels + ch]      // [numBoxes, channels]
+    : (box, ch) => data[ch * numBoxes + box];         // [channels, numBoxes]
+
   for (let i = 0; i < numBoxes; i++) {
-    // Find best class
+    // Find best class score
     let maxScore = 0;
     let maxClassId = 0;
     for (let c = 0; c < numClasses; c++) {
-      const score = data[(4 + c) * numBoxes + i];
+      const score = get(i, 4 + c);
       if (score > maxScore) {
         maxScore = score;
         maxClassId = c;
@@ -142,18 +175,18 @@ function parseYoloOutput(output) {
 
     if (maxScore < CONF_THRESHOLD) continue;
 
-    // Get box coordinates (cx, cy, w, h → x1, y1, x2, y2)
-    const cx = data[0 * numBoxes + i];
-    const cy = data[1 * numBoxes + i];
-    const w = data[2 * numBoxes + i];
-    const h = data[3 * numBoxes + i];
+    // Box coordinates: cx, cy, w, h → x1, y1, x2, y2
+    const cx = get(i, 0);
+    const cy = get(i, 1);
+    const w  = get(i, 2);
+    const h  = get(i, 3);
 
     detections.push({
       x1: cx - w / 2,
       y1: cy - h / 2,
       x2: cx + w / 2,
       y2: cy + h / 2,
-      confidence: maxScore,
+      confidence: Math.round(maxScore * 10000) / 10000, // Ensure 0-1 range
       class_id: maxClassId,
       class_name: CLASS_NAMES[maxClassId] || 'UNKNOWN',
     });
