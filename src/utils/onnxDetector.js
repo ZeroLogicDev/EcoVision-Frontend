@@ -1,8 +1,9 @@
 import * as ort from 'onnxruntime-web';
 import { CLASS_NAMES } from '@/constants/wasteClasses';
 
-// Use WASM backend (works everywhere, no GPU required)
+// Configure WASM paths (used as fallback if WebGL not available)
 ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/';
+ort.env.wasm.numThreads = navigator.hardwareConcurrency || 4;
 
 const MODEL_URL = '/models/yolo26n_eco.onnx';
 const INPUT_SIZE = 640;
@@ -12,14 +13,14 @@ const IOU_THRESHOLD = 0.45;
 let session = null;
 let isLoading = false;
 let loadError = null;
+let activeBackend = 'unknown';
 
 /**
- * Load the ONNX model — called once, cached globally.
+ * Load the ONNX model — tries WebGL (GPU) first, falls back to WASM (CPU).
  */
 export async function loadModel(onProgress) {
   if (session) return session;
   if (isLoading) {
-    // Wait for ongoing load
     while (isLoading) {
       await new Promise((r) => setTimeout(r, 100));
     }
@@ -32,10 +33,24 @@ export async function loadModel(onProgress) {
   try {
     if (onProgress) onProgress('Mengunduh model AI...');
 
-    session = await ort.InferenceSession.create(MODEL_URL, {
-      executionProviders: ['wasm'],
-      graphOptimizationLevel: 'all',
-    });
+    // Try WebGL (GPU) first — 5-20x faster than WASM
+    try {
+      session = await ort.InferenceSession.create(MODEL_URL, {
+        executionProviders: ['webgl'],
+        graphOptimizationLevel: 'all',
+      });
+      activeBackend = 'webgl';
+      console.log('[ONNX] Model loaded with WebGL (GPU) backend');
+    } catch {
+      // Fallback to WASM (CPU)
+      console.warn('[ONNX] WebGL not available, falling back to WASM');
+      session = await ort.InferenceSession.create(MODEL_URL, {
+        executionProviders: ['wasm'],
+        graphOptimizationLevel: 'all',
+      });
+      activeBackend = 'wasm';
+      console.log('[ONNX] Model loaded with WASM (CPU) backend');
+    }
 
     if (onProgress) onProgress('Model siap!');
     console.log('[ONNX] Model loaded successfully');
@@ -57,6 +72,7 @@ export function getModelStatus() {
     isLoaded: !!session,
     isLoading,
     error: loadError,
+    backend: activeBackend,
   };
 }
 
