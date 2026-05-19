@@ -1,14 +1,16 @@
+import { getClassConfig, getClassColor } from '@/constants/wasteClasses';
+
 /**
- * Draw bounding boxes on a canvas overlay.
+ * Draw bounding boxes on a canvas overlay — multi-class with unique colors.
  *
  * @param {CanvasRenderingContext2D} ctx
- * @param {Array} detections - [{x1, y1, x2, y2, confidence, class_name}]
+ * @param {Array} detections - [{x1, y1, x2, y2, confidence, class_name, class_id}]
  * @param {number} videoWidth - Actual video element width
  * @param {number} videoHeight - Actual video element height
  * @param {number} modelWidth - Model input width (e.g., 320 or 640)
  * @param {number} modelHeight - Model input height
  */
-export function drawDetections(ctx, detections, videoWidth, videoHeight, modelWidth = 640, modelHeight = 640) {
+export function drawDetections(ctx, detections, videoWidth, videoHeight, modelWidth = 320, modelHeight = 320) {
   ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
 
   if (!detections || detections.length === 0) return;
@@ -22,12 +24,16 @@ export function drawDetections(ctx, detections, videoWidth, videoHeight, modelWi
     const w = (det.x2 - det.x1) * scaleX;
     const h = (det.y2 - det.y1) * scaleY;
     const confidence = Math.round(det.confidence * 100);
-    const label = `Sampah ${confidence}%`;
+
+    // Get class-specific color and label
+    const classConfig = getClassConfig(det.class_name);
+    const color = classConfig.color;
+    const label = `${classConfig.nameId} ${confidence}%`;
 
     // Bounding box
-    ctx.strokeStyle = '#00ff6a';
+    ctx.strokeStyle = color;
     ctx.lineWidth = 2.5;
-    ctx.shadowColor = 'rgba(0, 255, 106, 0.5)';
+    ctx.shadowColor = `${color}80`;
     ctx.shadowBlur = 8;
     ctx.strokeRect(x, y, w, h);
     ctx.shadowBlur = 0;
@@ -66,7 +72,7 @@ export function drawDetections(ctx, detections, videoWidth, videoHeight, modelWi
     const labelHeight = 22;
     const labelY = y > labelHeight + 4 ? y - labelHeight - 4 : y + 4;
 
-    ctx.fillStyle = '#00ff6a';
+    ctx.fillStyle = color;
     ctx.beginPath();
     ctx.roundRect(x, labelY, textWidth + 12, labelHeight, 4);
     ctx.fill();

@@ -1,49 +1,60 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, useState } from 'react';
 import { useWebcam } from './useWebcam';
-import { useSocket } from './useSocket';
 import { useDetectionStore } from '@/store/detectionStore';
+import { loadModel, detectFrame, getModelStatus } from '@/utils/onnxDetector';
 import { drawDetections, clearCanvas } from '@/utils/canvasHelper';
 
 /**
- * Orchestrator hook — combines webcam + WebSocket + canvas drawing.
- * Implements backpressure + 10 FPS cap + round-trip latency tracking.
+ * Orchestrator hook — combines webcam + ONNX local inference + canvas drawing.
+ * No WebSocket needed — inference runs entirely in the browser.
  */
 export function useDetection() {
   const webcam = useWebcam();
-  const socket = useSocket();
   const overlayCanvasRef = useRef(null);
   const animationRef = useRef(null);
-  const waitingRef = useRef(false);
-  const sendTimeRef = useRef(0);        // ← Track when frame was sent
-  const fpsWindowRef = useRef([]);       // ← Sliding window for accurate FPS
+  const fpsWindowRef = useRef([]);
+  const [modelStatus, setModelStatus] = useState('idle'); // idle | loading | ready | error
+  const [modelError, setModelError] = useState(null);
 
   const {
-    isConnected,
     connectionStatus,
     detections,
     isStreaming,
     setIsStreaming,
     setFPS,
     setLatency,
+    setDetections,
+    setConnectionStatus,
     incrementFrameCount,
     resetDetections,
   } = useDetectionStore();
 
+  // Load ONNX model
+  const loadOnnxModel = useCallback(async () => {
+    try {
+      setModelStatus('loading');
+      setConnectionStatus('connecting');
+      await loadModel((msg) => console.log('[ONNX]', msg));
+      setModelStatus('ready');
+      setConnectionStatus('connected');
+    } catch (err) {
+      setModelStatus('error');
+      setModelError(err.message);
+      setConnectionStatus('error');
+    }
+  }, [setConnectionStatus]);
+
   const startLiveDetection = useCallback(async () => {
     await webcam.startCamera();
-    socket.connect();
+    await loadOnnxModel();
     setIsStreaming(true);
-    waitingRef.current = false;
     fpsWindowRef.current = [];
-  }, [webcam, socket, setIsStreaming]);
+  }, [webcam, loadOnnxModel, setIsStreaming]);
 
   const stopLiveDetection = useCallback(() => {
     setIsStreaming(false);
     webcam.stopCamera();
-    socket.disconnect();
     resetDetections();
-    waitingRef.current = false;
-    fpsWindowRef.current = [];
 
     if (animationRef.current) {
       cancelAnimationFrame(animationRef.current);
@@ -53,64 +64,54 @@ export function useDetection() {
     if (overlayCanvasRef.current) {
       clearCanvas(overlayCanvasRef.current.getContext('2d'));
     }
-  }, [webcam, socket, resetDetections, setIsStreaming]);
+  }, [webcam, resetDetections, setIsStreaming]);
 
-  // Main detection loop — backpressure + 10 FPS cap
+  // Main detection loop — local ONNX inference
   useEffect(() => {
-    if (!isStreaming || !webcam.isActive || !isConnected) return;
+    if (!isStreaming || !webcam.isActive || modelStatus !== 'ready') return;
 
-    const MIN_FRAME_INTERVAL = 100; // 10 FPS cap
-    let lastSendTime = 0;
+    let running = true;
 
-    const loop = () => {
-      if (!isStreaming) return;
+    const loop = async () => {
+      if (!running) return;
 
-      const now = performance.now();
+      const video = webcam.videoRef.current;
+      const canvas = webcam.canvasRef.current;
 
-      if (!waitingRef.current && now - lastSendTime >= MIN_FRAME_INTERVAL) {
-        const frame = webcam.captureFrame();
-        if (frame) {
-          waitingRef.current = true;
-          lastSendTime = now;
-          sendTimeRef.current = now; // ← Record send time for RTT
-          socket.sendFrame(frame);
+      if (video && canvas && video.readyState >= 2) {
+        try {
+          const start = performance.now();
+          const results = await detectFrame(video, canvas);
+          const latency = Math.round(performance.now() - start);
+
+          setDetections(results);
+          setLatency(latency);
           incrementFrameCount();
+
+          // Sliding window FPS
+          const now = performance.now();
+          fpsWindowRef.current.push(now);
+          fpsWindowRef.current = fpsWindowRef.current.filter(t => now - t < 1000);
+          setFPS(fpsWindowRef.current.length);
+        } catch (err) {
+          console.warn('[ONNX] Inference error:', err);
         }
       }
 
-      animationRef.current = requestAnimationFrame(loop);
+      if (running) {
+        animationRef.current = requestAnimationFrame(loop);
+      }
     };
 
     animationRef.current = requestAnimationFrame(loop);
 
     return () => {
+      running = false;
       if (animationRef.current) {
         cancelAnimationFrame(animationRef.current);
       }
     };
-  }, [isStreaming, webcam.isActive, isConnected]);
-
-  // When detections arrive → unblock + measure RTT + calculate FPS
-  useEffect(() => {
-    if (!isStreaming) return;
-
-    // Unblock next frame
-    waitingRef.current = false;
-
-    // Measure round-trip time (not just server inference)
-    if (sendTimeRef.current > 0) {
-      const rtt = Math.round(performance.now() - sendTimeRef.current);
-      setLatency(rtt);
-    }
-
-    // Sliding window FPS: count responses in last 1 second
-    const now = performance.now();
-    fpsWindowRef.current.push(now);
-    // Remove entries older than 1 second
-    fpsWindowRef.current = fpsWindowRef.current.filter(t => now - t < 1000);
-    setFPS(fpsWindowRef.current.length);
-
-  }, [detections]);
+  }, [isStreaming, webcam.isActive, modelStatus]);
 
   // Draw detections on overlay canvas
   useEffect(() => {
@@ -123,7 +124,7 @@ export function useDetection() {
     canvas.width = video.videoWidth || 640;
     canvas.height = video.videoHeight || 480;
 
-    drawDetections(ctx, detections, canvas.width, canvas.height, 640, 640);
+    drawDetections(ctx, detections, canvas.width, canvas.height, 320, 320);
   }, [detections]);
 
   return {
@@ -139,5 +140,7 @@ export function useDetection() {
     isStreaming,
     connectionStatus,
     detections,
+    modelStatus,
+    modelError,
   };
 }
