@@ -55,6 +55,7 @@ export default function UploadView({ onResult }) {
                   <Loader2 className="w-10 h-10 text-neon-500 animate-spin mx-auto mb-3" />
                   <p className="text-sm text-white/70">Menganalisis gambar...</p>
                   <p className="text-xs text-white/30 mt-1">Model yolo26m sedang bekerja</p>
+                  <p className="text-[10px] text-neon-500/70 mt-1">(Bisa memakan waktu hingga 3 menit saat server baru bangun)</p>
                 </div>
               </div>
             )}

@@ -26,7 +26,7 @@ const scanService = {
 
     const { data } = await axios.post(`${baseUrl}${endpoint}`, formData, {
       headers,
-      timeout: 60000, // 60s for cold start
+      timeout: 180000, // 3 minutes for Hugging Face cold start
     });
 
     return data;
