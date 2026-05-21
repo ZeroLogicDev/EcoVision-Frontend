@@ -53,7 +53,6 @@ export async function loadModel(onProgress) {
     }
 
     if (onProgress) onProgress('Model siap!');
-    console.log('[ONNX] Model loaded successfully');
     console.log('[ONNX] Input names:', session.inputNames);
     console.log('[ONNX] Output names:', session.outputNames);
     return session;
@@ -96,12 +95,11 @@ export async function detectFrame(video, canvas) {
   const numPixels = INPUT_SIZE * INPUT_SIZE;
 
   const float32Data = new Float32Array(3 * numPixels);
-
   for (let i = 0; i < numPixels; i++) {
-    const offset = i * 4; // RGBA
-    float32Data[i] = data[offset] / 255.0;                    // R → Channel 0
-    float32Data[numPixels + i] = data[offset + 1] / 255.0;    // G → Channel 1
-    float32Data[2 * numPixels + i] = data[offset + 2] / 255.0; // B → Channel 2
+    const offset = i * 4;
+    float32Data[i] = data[offset] / 255.0;
+    float32Data[numPixels + i] = data[offset + 1] / 255.0;
+    float32Data[2 * numPixels + i] = data[offset + 2] / 255.0;
   }
 
   const inputTensor = new ort.Tensor('float32', float32Data, [1, 3, INPUT_SIZE, INPUT_SIZE]);
@@ -110,93 +108,119 @@ export async function detectFrame(video, canvas) {
   const inputName = session.inputNames[0];
   const results = await session.run({ [inputName]: inputTensor });
 
-  // 4. Parse ALL outputs and find detections
+  // 4. Parse output
   const output = results[session.outputNames[0]];
-  return parseYoloOutput(output);
+  return parseOutput(output);
 }
 
-// ─── OUTPUT PARSING ─────────────────────────────────────────────
-
-let cachedLayout = null;
-
 /**
- * Parse YOLO ONNX output — brute-force tests both tensor layouts
- * on the first frame, then caches the correct one.
+ * Parse model output.
+ *
+ * This model uses NMS-included export format:
+ *   Output shape: [1, 300, 6]
+ *   Per detection: [x1, y1, x2, y2, confidence, class_id]
+ *   - Coordinates are in pixel space (0-640)
+ *   - Confidence is already 0-1 (post-sigmoid by model)
+ *   - class_id is an integer (0-5)
+ *   - 300 = max detections (padded with zeros/low-conf if fewer)
  */
-function parseYoloOutput(output) {
+function parseOutput(output) {
   const dims = output.dims;
   const data = output.data;
 
-  // Debug: log once
-  if (!cachedLayout) {
-    console.log('[ONNX] Output dims:', JSON.stringify(dims));
-    console.log('[ONNX] Data length:', data.length);
-    // Log first 20 raw values to understand the data
-    const sample = [];
-    for (let i = 0; i < Math.min(20, data.length); i++) {
-      sample.push(Number(data[i]).toFixed(4));
-    }
-    console.log('[ONNX] First 20 values:', sample.join(', '));
+  console.log('[ONNX] Output dims:', JSON.stringify(dims));
+
+  let numDetections, numValues;
+
+  if (dims.length === 3) {
+    // [1, numDetections, 6]
+    numDetections = dims[1];
+    numValues = dims[2];
+  } else if (dims.length === 2) {
+    // [numDetections, 6]
+    numDetections = dims[0];
+    numValues = dims[1];
+  } else {
+    console.warn('[ONNX] Unexpected dims:', dims);
+    return [];
   }
 
-  // For 3D tensors: [batch, A, B]
-  // For 2D tensors: [A, B]
-  const a = dims.length === 3 ? dims[1] : dims[0];
-  const b = dims.length === 3 ? dims[2] : dims[1];
-  const offset = dims.length === 3 ? 0 : 0; // data starts at 0 regardless
-
-  if (!cachedLayout) {
-    // Try both layouts — sigmoid is applied inside tryParseLayout
-    const det1 = tryParseLayout(data, a, b, false);
-    const det2 = tryParseLayout(data, b, a, true);
-
-    console.log(`[ONNX] Layout 1 (ch=${a}, boxes=${b}): ${det1.length} detections`);
-    console.log(`[ONNX] Layout 2 (ch=${b}, boxes=${a}): ${det2.length} detections`);
-    if (det1.length > 0) console.log('[ONNX] Layout 1 sample:', JSON.stringify(det1[0]));
-    if (det2.length > 0) console.log('[ONNX] Layout 2 sample:', JSON.stringify(det2[0]));
-
-    // Pick layout with more detections (both now have valid 0-1 scores thanks to sigmoid)
-    if (det1.length >= det2.length && det1.length > 0) {
-      cachedLayout = { channels: a, boxes: b, transposed: false };
-      console.log('[ONNX] ✅ Using Layout 1');
-      return nms(det1, IOU_THRESHOLD);
-    } else if (det2.length > 0) {
-      cachedLayout = { channels: b, boxes: a, transposed: true };
-      console.log('[ONNX] ✅ Using Layout 2');
-      return nms(det2, IOU_THRESHOLD);
-    } else {
-      console.warn('[ONNX] No detections from either layout');
-      cachedLayout = { channels: Math.min(a, b), boxes: Math.max(a, b), transposed: a > b };
-      return [];
-    }
+  // NMS-included format: [x1, y1, x2, y2, conf, class_id]
+  if (numValues === 6) {
+    return parseNMSFormat(data, numDetections);
   }
 
-  // Use cached layout
-  const dets = tryParseLayout(data, cachedLayout.channels, cachedLayout.boxes, cachedLayout.transposed);
-  return nms(dets, IOU_THRESHOLD);
+  // Raw YOLO format: [1, 4+nc, numBoxes] or [1, numBoxes, 4+nc]
+  return parseRawYoloFormat(data, dims);
 }
 
 /**
- * Try parsing with specific layout.
- * @param {boolean} transposed - If true, data is [boxes, channels]. If false, [channels, boxes].
+ * Parse NMS-included format: [numDetections, 6]
+ * Each row: [x1, y1, x2, y2, confidence, class_id]
  */
-function tryParseLayout(data, numChannels, numBoxes, transposed) {
+function parseNMSFormat(data, numDetections) {
+  const detections = [];
+
+  for (let i = 0; i < numDetections; i++) {
+    const offset = i * 6;
+    const x1 = data[offset + 0];
+    const y1 = data[offset + 1];
+    const x2 = data[offset + 2];
+    const y2 = data[offset + 3];
+    const confidence = data[offset + 4];
+    const classId = Math.round(data[offset + 5]);
+
+    // Skip low confidence (padded/empty detections)
+    if (confidence < CONF_THRESHOLD) continue;
+
+    // Skip invalid boxes
+    if (x2 <= x1 || y2 <= y1) continue;
+    if (x1 < 0 && y1 < 0 && x2 < 0 && y2 < 0) continue;
+
+    detections.push({
+      x1: Math.max(0, x1),
+      y1: Math.max(0, y1),
+      x2: Math.min(INPUT_SIZE, x2),
+      y2: Math.min(INPUT_SIZE, y2),
+      confidence: Math.round(confidence * 10000) / 10000,
+      class_id: classId,
+      class_name: CLASS_NAMES[classId] || 'UNKNOWN',
+    });
+  }
+
+  // Sort by confidence descending
+  detections.sort((a, b) => b.confidence - a.confidence);
+  return detections;
+}
+
+/**
+ * Fallback: Parse raw YOLO format [1, 4+nc, numBoxes]
+ * (In case model is re-exported without NMS)
+ */
+function parseRawYoloFormat(data, dims) {
+  const a = dims.length === 3 ? dims[1] : dims[0];
+  const b = dims.length === 3 ? dims[2] : dims[1];
+
+  // Determine channels vs boxes (channels = smaller dimension)
+  const numChannels = Math.min(a, b);
+  const numBoxes = Math.max(a, b);
+  const transposed = a > b;
   const numClasses = numChannels - 4;
-  if (numClasses <= 0 || numClasses > 200) return [];
+
+  if (numClasses <= 0) return [];
 
   const get = transposed
-    ? (b, c) => data[b * numChannels + c]
-    : (b, c) => data[c * numBoxes + b];
+    ? (box, ch) => data[box * numChannels + ch]
+    : (box, ch) => data[ch * numBoxes + box];
 
   const detections = [];
 
   for (let i = 0; i < numBoxes; i++) {
-    // Find max class score — apply sigmoid since ONNX outputs raw logits
     let maxScore = -Infinity;
     let maxClassId = 0;
     for (let c = 0; c < numClasses; c++) {
       const raw = get(i, 4 + c);
-      const score = sigmoid(raw);
+      const score = 1 / (1 + Math.exp(-raw)); // sigmoid
       if (score > maxScore) {
         maxScore = score;
         maxClassId = c;
@@ -207,12 +231,10 @@ function tryParseLayout(data, numChannels, numBoxes, transposed) {
 
     const cx = get(i, 0);
     const cy = get(i, 1);
-    const w  = get(i, 2);
-    const h  = get(i, 3);
+    const w = get(i, 2);
+    const h = get(i, 3);
 
-    // Sanity check: box coords should be in 0-INPUT_SIZE range
-    if (cx < 0 || cx > INPUT_SIZE * 2 || cy < 0 || cy > INPUT_SIZE * 2) continue;
-    if (w <= 0 || h <= 0 || w > INPUT_SIZE * 2 || h > INPUT_SIZE * 2) continue;
+    if (w <= 0 || h <= 0) continue;
 
     detections.push({
       x1: cx - w / 2,
@@ -225,35 +247,25 @@ function tryParseLayout(data, numChannels, numBoxes, transposed) {
     });
   }
 
-  return detections;
+  return nms(detections, IOU_THRESHOLD);
 }
 
 /**
- * Sigmoid activation — converts raw logits to 0-1 probability.
+ * Non-Maximum Suppression (only needed for raw YOLO format).
  */
-function sigmoid(x) {
-  return 1 / (1 + Math.exp(-x));
-}
-
-// ─── NMS ─────────────────────────────────────────────────────────
-
 function nms(detections, iouThreshold) {
   if (detections.length === 0) return [];
-
   detections.sort((a, b) => b.confidence - a.confidence);
 
   const keep = [];
-
   while (detections.length > 0) {
     const best = detections.shift();
     keep.push(best);
-
     detections = detections.filter((det) => {
       if (det.class_id !== best.class_id) return true;
       return iou(best, det) < iouThreshold;
     });
   }
-
   return keep;
 }
 
@@ -266,6 +278,5 @@ function iou(a, b) {
   const intersection = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
   const areaA = (a.x2 - a.x1) * (a.y2 - a.y1);
   const areaB = (b.x2 - b.x1) * (b.y2 - b.y1);
-
   return intersection / (areaA + areaB - intersection + 1e-6);
 }
